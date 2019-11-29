@@ -57,6 +57,9 @@ class FilepondController extends BaseController
             ], $exception->status);
 
         }
+        catch(\Exception $e) {
+
+        }
 
         $tempPath = '/tmp';
         $filePath = tempnam($tempPath, 'nova-filepond-');
@@ -106,23 +109,23 @@ class FilepondController extends BaseController
 
         $serverId = Filepond::getPathFromServerId($request->input('serverId'));
 
-        $pathInfo = pathinfo($serverId);
-        $filename = $pathInfo[ 'filename' ];
-        $basename = $pathInfo[ 'basename' ];
-        $extension = $pathInfo[ 'extension' ];
+        if(Storage::disk($disk)->has($serverId)) {
+            $pathInfo = pathinfo($serverId);
+            $filename = $pathInfo[ 'filename' ];
+            $basename = $pathInfo[ 'basename' ];
+            $extension = $pathInfo[ 'extension' ];
 
-        $response = response(Storage::disk($disk)->get($serverId))
-            ->header('Content-Disposition', "inline; name=\"$filename\"; filename=\"$basename\"")
-            ->header('Content-Length', Storage::disk($disk)->size($serverId));
+            $response = response(Storage::disk($disk)->get($serverId))
+                ->header('Content-Disposition', "inline; name=\"$filename\"; filename=\"$basename\"")
+                ->header('Content-Length', Storage::disk($disk)->size($serverId));
 
-        if ($mimeType = Filepond::guessMimeType($extension)) {
+            if ($mimeType = Filepond::guessMimeType($extension)) {
 
-            $response->header('Content-Type', $mimeType);
+                $response->header('Content-Type', $mimeType);
 
+            }
+            return $response;
         }
-
-        return $response;
-
     }
 
     private function getCreationRules(string $resource, NovaRequest $request): array
