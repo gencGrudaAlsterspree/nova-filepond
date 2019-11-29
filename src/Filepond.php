@@ -23,6 +23,15 @@ class Filepond extends Field
     public $component = 'filepond';
 
     /**
+     * On delete callback.
+     *
+     * @var callable
+     */
+    public $onDeleteCallback;
+
+    /**
+     * On store callback.
+     *
      * @var callable
      */
     public $storeAsCallback;
@@ -168,8 +177,26 @@ class Filepond extends Field
         return $this;
     }
 
-    public function storeAs(callable $callback)
-    {
+    /**
+     * Callback when image is being deleted.
+     *
+     * @param callable $callback
+     * @return $this
+     */
+    public function onDelete(callable $callback) {
+
+        $this->onDeleteCallback = $callback;
+
+        return $this;
+    }
+
+    /**
+     * Callback when image(s) is being stored.
+     *
+     * @param callable $callback
+     * @return $this
+     */
+    public function storeAs(callable $callback) {
 
         $this->storeAsCallback = $callback;
 
@@ -222,6 +249,25 @@ class Filepond extends Field
     }
 
     /**
+     * Check if given string is enrypted.
+     *
+     * @param $encrypted
+     * @return bool
+     */
+    public static function isEncryptedString($encrypted) {
+        if(!is_string($encrypted)) {
+            return false;
+        }
+
+        switch(config('app.cipher')) {
+            case 'AES-256-CBC':
+                return strlen(str_replace(['/','_','-'], '', explode('.', $encrypted)[0])) > 66;
+                break;
+            // @todo: any other ciphers used with laravel
+        }
+    }
+
+    /**
      * Hydrate the given attribute on the model based on the incoming request.
      *
      * @param NovaRequest $request
@@ -232,43 +278,61 @@ class Filepond extends Field
      * @return mixed
      * @throws Exception
      */
-    protected function fillAttributeFromRequest(NovaRequest $request, $requestAttribute, $model, $attribute)
-    {
+    protected function fillAttributeFromRequest(NovaRequest $request, $requestAttribute, $model, $attribute) {
 
-        $currentImages = collect($model->{$requestAttribute});
+        $encryptedServerId = $request->input($requestAttribute);
+        // current images are images assigned to the attribute of this model.
+        $currentFiles = collect($model->{$requestAttribute});
 
-        /**
-         * null when all images are removed
-         */
-        if ($request->input($requestAttribute) === null) {
+        $hasUploadedFiles = $request->input($requestAttribute) !== null;
+        $modelHasFiles = $model->{$requestAttribute} !== null;
 
-            $this->removeImages($currentImages);
-
-            $model->setAttribute($requestAttribute, null);
-
-            return;
-
-        }
-
+        // single image
         if ($this->multiple === false) {
 
-            $serverId = static::getPathFromServerId($request->input($requestAttribute));
+            $uploadedFile = is_null($encryptedServerId) ? null : static::getPathFromServerId($encryptedServerId);
+            $uploadedFileIsTmp = Str::startsWith($uploadedFile, '/tmp/');
 
             /**
-             * If no changes were made the first image should match the given serverId
+             * null when all images are removed
              */
-            if ($currentImages->first() === $serverId) {
-
+            if ($hasUploadedFiles === false) {
+                // reset attribute on model to empty if no image was passed.
+                if ($modelHasFiles === true) {
+                    $this->removeFiles($currentFiles, $model, $attribute);
+                }
+                $model->setAttribute($requestAttribute, null);
                 return;
-
             }
 
-            $this->removeImages($currentImages);
+            // file is newly uploaded and model did not had a previous file
+            if($uploadedFileIsTmp === true && $model->{$requestAttribute} === $uploadedFile) {
+                // delete files
+                $this->removeFiles($currentFiles);
+                // reset to go into next if.
+                $model->setAttribute($requestAttribute, null);
+            }
 
-            $file = new File($serverId);
+            // file is newly uploaded and model has a previous file attached
+            if ($uploadedFileIsTmp === true && $model->{$requestAttribute} !== $uploadedFile) {
+                /**
+                 * Do not fail if image doesn't exist. We only keep current value of given `$model->{$attribute}` and set
+                 * it with it's original value.
+                 */
+                try {
+                    $file = new File($uploadedFile);
+                    $savedFile = $this->moveFile($file);
+                    $model->setAttribute($attribute, $savedFile);
+                } catch (\Exception $e) {
+                    $model->setAttribute($attribute, $uploadedFile);
+                    return;
+                }
 
-            $model->setAttribute($attribute, $this->moveFile($file));
+                return;
+            }
 
+            // save attribute with the decrypted correct value.
+            $model->setAttribute($requestAttribute, $uploadedFile);
             return;
 
         }
@@ -280,18 +344,20 @@ class Filepond extends Field
             return static::getPathFromServerId($file);
         });
 
-        $toKeep = $files->intersect($currentImages); // files that exist on the request and on the model
-        $toAppend = $files->diff($currentImages); // files that exist only on the request
-        $toDelete = $currentImages->diff($files); // files that doest exist on the request but exist on the model
+        $toKeep = $files->intersect($currentFiles); // files that exist on the request and on the model
+        $toAppend = $files->diff($currentFiles); // files that exist only on the request
+        $toDelete = $currentFiles->diff($files); // files that doest exist on the request but exist on the model
 
-        $this->removeImages($toDelete);
+        $this->removeFiles($toDelete);
 
-        foreach ($toAppend as $serverId) {
-
-            $file = new File($serverId);
-
-            $toKeep->push($this->moveFile($file));
-
+        foreach ($toAppend as $uploadedFile) {
+            try {
+                $file = new File($uploadedFile);
+                $toKeep->push($this->moveFile($file));
+            }
+            catch(\Exception $e) {
+                // skip
+            }
         }
 
         $model->setAttribute($attribute, $toKeep->values());
@@ -321,15 +387,24 @@ class Filepond extends Field
 
     }
 
-    private function removeImages(Collection $images): void
-    {
-
-        foreach ($images as $image) {
-
+    /**
+     * @param Collection $files
+     */
+    private function removeFiles(Collection $files, $model, $attribute): void {
+        foreach ($files as $image) {
             Storage::disk($this->disk)->delete($image);
-
+            if ($this->onDeleteCallback) {
+                call_user_func($this->onDeleteCallback, $model, $attribute, $image, $this->disk);
+            }
         }
+    }
 
+    /**
+     * @deprecated
+     * @param Collection $images
+     */
+    private function removeImages(Collection $images): void {
+        $this->removeFiles($images);
     }
 
     /**
@@ -392,9 +467,8 @@ class Filepond extends Field
      *
      * @return string
      */
-    public static function getPathFromServerId(string $serverId): string
-    {
-        return decrypt($serverId);
+    public static function getPathFromServerId($serverId): string {
+        return static::isEncryptedString($serverId) ? decrypt($serverId) : $serverId;
     }
 
     private function getLabels(): Collection
